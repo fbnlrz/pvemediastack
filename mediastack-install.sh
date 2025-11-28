@@ -3,7 +3,7 @@
 # Copyright (c) 2021-2025 tteck | Modified by Fabi
 # Author: tteck (tteckster) | Modified for combined installation
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
-# Combined Media Stack: Sonarr + Radarr + SABnzbd
+# Combined Media Stack: Sonarr + Radarr + Prowlarr + SABnzbd
 
 set -e
 
@@ -35,7 +35,7 @@ fi
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Combined Media Stack Installation"
-echo "  Sonarr + Radarr + SABnzbd"
+echo "  Sonarr + Radarr + Prowlarr + SABnzbd"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -61,13 +61,28 @@ apt-get install -y \
 msg_ok "Base dependencies installed"
 
 # ======================
+# Create media user
+# ======================
+msg_info "Creating media user for permission management"
+groupadd -g 1500 media 2>/dev/null || true
+useradd -u 1500 -g media -m -s /bin/bash media 2>/dev/null || true
+msg_ok "Media user created (UID: 1500, GID: 1500)"
+
+# ======================
 # SABnzbd Installation
 # ======================
 msg_info "Setting up Unrar for SABnzbd"
+if [ -f /etc/os-release ]; then
+    source /etc/os-release
+    DEBIAN_CODENAME="${VERSION_CODENAME:-trixie}"
+else
+    DEBIAN_CODENAME="trixie"
+fi
+
 cat <<EOF >/etc/apt/sources.list.d/non-free.sources
 Types: deb
 URIs: http://deb.debian.org/debian/
-Suites: trixie
+Suites: ${DEBIAN_CODENAME}
 Components: non-free 
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
@@ -92,6 +107,9 @@ source venv/bin/activate
 pip install --upgrade pip &>/dev/null
 pip install -r requirements.txt &>/dev/null || msg_error "Failed to install SABnzbd requirements"
 deactivate
+
+# Set permissions
+chown -R media:media /opt/sabnzbd
 msg_ok "SABnzbd installed"
 
 # Optional: par2cmdline-turbo
@@ -118,7 +136,8 @@ After=network.target
 WorkingDirectory=/opt/sabnzbd
 ExecStart=/opt/sabnzbd/venv/bin/python SABnzbd.py -s 0.0.0.0:7777
 Restart=always
-User=root
+User=media
+Group=media
 
 [Install]
 WantedBy=multi-user.target
@@ -132,12 +151,17 @@ msg_ok "SABnzbd service created and started (Port 7777)"
 # ======================
 msg_info "Installing Sonarr v4"
 mkdir -p /var/lib/sonarr/
+chown -R media:media /var/lib/sonarr/
 chmod 775 /var/lib/sonarr/
 
 cd /tmp
 curl -fsSL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=x64" -o "SonarrV4.tar.gz" || msg_error "Failed to download Sonarr"
 tar -xzf SonarrV4.tar.gz
+if [ -d "/opt/Sonarr" ]; then
+    rm -rf /opt/Sonarr
+fi
 mv Sonarr /opt/
+chown -R media:media /opt/Sonarr
 rm -rf SonarrV4.tar.gz
 msg_ok "Sonarr v4 installed"
 
@@ -149,6 +173,8 @@ After=syslog.target network.target
 
 [Service]
 Type=simple
+User=media
+Group=media
 ExecStart=/opt/Sonarr/Sonarr -nobrowser -data=/var/lib/sonarr/
 TimeoutStopSec=20
 KillMode=process
@@ -166,12 +192,15 @@ msg_ok "Sonarr service created and started (Port 8989)"
 # ======================
 msg_info "Installing Radarr"
 mkdir -p /var/lib/radarr/
+chown -R media:media /var/lib/radarr/
+chmod 775 /var/lib/radarr/
 
 cd /tmp
 RADARR_VERSION=$(curl -s https://api.github.com/repos/Radarr/Radarr/releases/latest | grep -oP '"tag_name": "v\K[^"]*')
 curl -fsSL "https://github.com/Radarr/Radarr/releases/download/v${RADARR_VERSION}/Radarr.master.${RADARR_VERSION}.linux-core-x64.tar.gz" -o "Radarr.tar.gz" || msg_error "Failed to download Radarr"
 tar -xzf Radarr.tar.gz -C /opt/
-chmod 775 /var/lib/radarr/ /opt/Radarr/
+chown -R media:media /opt/Radarr
+chmod 775 /opt/Radarr/
 rm -rf Radarr.tar.gz
 msg_ok "Radarr installed"
 
@@ -182,6 +211,8 @@ Description=Radarr Daemon
 After=syslog.target network.target
 
 [Service]
+User=media
+Group=media
 UMask=0002
 Type=simple
 ExecStart=/opt/Radarr/Radarr -nobrowser -data=/var/lib/radarr/
@@ -197,12 +228,44 @@ systemctl enable --now radarr &>/dev/null || msg_error "Failed to start Radarr"
 msg_ok "Radarr service created and started (Port 7878)"
 
 # ======================
-# Create media user
+# Prowlarr Installation
 # ======================
-msg_info "Creating media user for permission management"
-groupadd -g 1500 media 2>/dev/null || true
-useradd -u 1500 -g media -m -s /bin/bash media 2>/dev/null || true
-msg_ok "Media user created (UID: 1500, GID: 1500)"
+msg_info "Installing Prowlarr"
+mkdir -p /var/lib/prowlarr/
+chown -R media:media /var/lib/prowlarr/
+chmod 775 /var/lib/prowlarr/
+
+cd /tmp
+PROWLARR_VERSION=$(curl -s https://api.github.com/repos/Prowlarr/Prowlarr/releases/latest | grep -oP '"tag_name": "v\K[^"]*')
+curl -fsSL "https://github.com/Prowlarr/Prowlarr/releases/download/v${PROWLARR_VERSION}/Prowlarr.master.${PROWLARR_VERSION}.linux-core-x64.tar.gz" -o "Prowlarr.tar.gz" || msg_error "Failed to download Prowlarr"
+tar -xzf Prowlarr.tar.gz -C /opt/
+chown -R media:media /opt/Prowlarr
+chmod 775 /opt/Prowlarr/
+rm -rf Prowlarr.tar.gz
+msg_ok "Prowlarr installed"
+
+msg_info "Creating Prowlarr service"
+cat <<EOF >/etc/systemd/system/prowlarr.service
+[Unit]
+Description=Prowlarr Daemon
+After=syslog.target network.target
+
+[Service]
+User=media
+Group=media
+UMask=0002
+Type=simple
+ExecStart=/opt/Prowlarr/Prowlarr -nobrowser -data=/var/lib/prowlarr/
+TimeoutStopSec=20
+KillMode=process
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now prowlarr &>/dev/null || msg_error "Failed to start Prowlarr"
+msg_ok "Prowlarr service created and started (Port 9696)"
 
 # ======================
 # Final Summary
@@ -215,24 +278,23 @@ echo "  ✅ Media Stack Installation Complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  Services installed and running:"
-echo "  • SABnzbd:  http://${IP}:7777"
-echo "  • Sonarr:   http://${IP}:8989"
-echo "  • Radarr:   http://${IP}:7878"
+echo "  • SABnzbd:   http://${IP}:7777"
+echo "  • Sonarr:    http://${IP}:8989"
+echo "  • Radarr:    http://${IP}:7878"
+echo "  • Prowlarr:  http://${IP}:9696"
 echo ""
 echo "  Next steps:"
 echo "  1. Configure SABnzbd with your Usenet provider"
 echo "  2. Set download paths in SABnzbd"
-echo "  3. Add SABnzbd as download client in Sonarr/Radarr"
-echo "     (Host: localhost, Port: 7777)"
-echo "  4. Configure your media root folders"
+echo "  3. Add SABnzbd as download client in Prowlarr"
+echo "  4. Connect Prowlarr to Sonarr and Radarr"
+echo "  5. Configure your media root folders"
 echo ""
 echo "  Notes:"
-echo "  • All services run as root by default"
-echo "  • A 'media' user (UID: 1500) has been created"
-echo "  • For NFS/CIFS mounts, use UID/GID: 1500"
+echo "  • All services run as user: media (UID: 1500)"
+echo "  • For NFS/CIFS mounts, ensure permissions for UID/GID: 1500"
 echo ""
 echo "  Check service status:"
-echo "  systemctl status sabnzbd sonarr radarr"
+echo "  systemctl status sabnzbd sonarr radarr prowlarr"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
