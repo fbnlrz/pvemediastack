@@ -5,22 +5,60 @@
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
 # Combined Media Stack: Sonarr + Radarr + SABnzbd
 
-source /dev/stdin <<<"$FUNCTIONS_FILE_PATH"
-color
-verb_ip6
-catch_errors
-setting_up_container
-network_check
-update_os
+set -e
 
-msg_info "Installing Base Dependencies"
-$STD apt install -y \
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Helper functions
+msg_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+msg_ok() {
+    echo -e "${GREEN}[OK]${NC} $1"
+}
+
+msg_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+    exit 1
+}
+
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   msg_error "This script must be run as root"
+fi
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  Combined Media Stack Installation"
+echo "  Sonarr + Radarr + SABnzbd"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Update system
+msg_info "Updating system"
+apt-get update &>/dev/null || msg_error "Failed to update system"
+msg_ok "System updated"
+
+# Install base dependencies
+msg_info "Installing base dependencies"
+apt-get install -y \
+  curl \
+  wget \
   sqlite3 \
   par2 \
-  p7zip-full
-msg_ok "Installed Base Dependencies"
-
-PYTHON_VERSION="3.13" setup_uv
+  p7zip-full \
+  ca-certificates \
+  gnupg \
+  python3 \
+  python3-pip \
+  python3-venv \
+  git &>/dev/null || msg_error "Failed to install dependencies"
+msg_ok "Base dependencies installed"
 
 # ======================
 # SABnzbd Installation
@@ -33,23 +71,44 @@ Suites: trixie
 Components: non-free 
 Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 EOF
-$STD apt update
-$STD apt install -y unrar
-msg_ok "Setup Unrar"
+apt-get update &>/dev/null
+apt-get install -y unrar &>/dev/null || msg_error "Failed to install unrar"
+msg_ok "Unrar installed"
 
 msg_info "Installing SABnzbd"
-fetch_and_deploy_gh_release "sabnzbd-org" "sabnzbd/sabnzbd" "prebuild" "latest" "/opt/sabnzbd" "SABnzbd-*-src.tar.gz"
-$STD uv venv /opt/sabnzbd/venv
-$STD uv pip install -r /opt/sabnzbd/requirements.txt --python=/opt/sabnzbd/venv/bin/python
-msg_ok "Installed SABnzbd"
+mkdir -p /opt
+cd /opt
 
-read -r -p "Would you like to install par2cmdline-turbo? <y/N> " prompt
-if [[ "${prompt,,}" =~ ^(y|yes)$ ]]; then
-  mv /usr/bin/par2 /usr/bin/par2.old
-  fetch_and_deploy_gh_release "par2cmdline-turbo" "animetosho/par2cmdline-turbo" "prebuild" "latest" "/usr/bin/" "*-linux-amd64.zip"
+# Clone SABnzbd
+if [ -d "/opt/sabnzbd" ]; then
+    rm -rf /opt/sabnzbd
+fi
+git clone --depth 1 https://github.com/sabnzbd/sabnzbd.git &>/dev/null || msg_error "Failed to clone SABnzbd"
+cd sabnzbd
+
+# Create virtual environment and install dependencies
+python3 -m venv venv &>/dev/null || msg_error "Failed to create venv"
+source venv/bin/activate
+pip install --upgrade pip &>/dev/null
+pip install -r requirements.txt &>/dev/null || msg_error "Failed to install SABnzbd requirements"
+deactivate
+msg_ok "SABnzbd installed"
+
+# Optional: par2cmdline-turbo
+read -r -p "Would you like to install par2cmdline-turbo for faster repairs? (y/N): " response
+if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+    msg_info "Installing par2cmdline-turbo"
+    PAR2_VERSION=$(curl -s https://api.github.com/repos/animetosho/par2cmdline-turbo/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+    wget -q "https://github.com/animetosho/par2cmdline-turbo/releases/download/${PAR2_VERSION}/par2cmdline-turbo-${PAR2_VERSION}-linux-amd64.zip" -O /tmp/par2.zip
+    unzip -q /tmp/par2.zip -d /tmp/
+    mv /usr/bin/par2 /usr/bin/par2.old 2>/dev/null || true
+    mv /tmp/par2cmdline-turbo*/par2 /usr/bin/
+    chmod +x /usr/bin/par2
+    rm -rf /tmp/par2*
+    msg_ok "par2cmdline-turbo installed"
 fi
 
-msg_info "Creating SABnzbd Service"
+msg_info "Creating SABnzbd service"
 cat <<EOF >/etc/systemd/system/sabnzbd.service
 [Unit]
 Description=SABnzbd
@@ -64,8 +123,9 @@ User=root
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable -q --now sabnzbd
-msg_ok "Created SABnzbd Service (Port 7777)"
+systemctl daemon-reload
+systemctl enable --now sabnzbd &>/dev/null || msg_error "Failed to start SABnzbd"
+msg_ok "SABnzbd service created and started (Port 7777)"
 
 # ======================
 # Sonarr Installation
@@ -73,39 +133,49 @@ msg_ok "Created SABnzbd Service (Port 7777)"
 msg_info "Installing Sonarr v4"
 mkdir -p /var/lib/sonarr/
 chmod 775 /var/lib/sonarr/
-curl -fsSL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=x64" -o "SonarrV4.tar.gz"
-tar -xzf SonarrV4.tar.gz
-mv Sonarr /opt
-rm -rf SonarrV4.tar.gz
-msg_ok "Installed Sonarr v4"
 
-msg_info "Creating Sonarr Service"
+cd /tmp
+curl -fsSL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=x64" -o "SonarrV4.tar.gz" || msg_error "Failed to download Sonarr"
+tar -xzf SonarrV4.tar.gz
+mv Sonarr /opt/
+rm -rf SonarrV4.tar.gz
+msg_ok "Sonarr v4 installed"
+
+msg_info "Creating Sonarr service"
 cat <<EOF >/etc/systemd/system/sonarr.service
 [Unit]
 Description=Sonarr Daemon
 After=syslog.target network.target
+
 [Service]
 Type=simple
 ExecStart=/opt/Sonarr/Sonarr -nobrowser -data=/var/lib/sonarr/
 TimeoutStopSec=20
 KillMode=process
 Restart=on-failure
+
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable -q --now sonarr
-msg_ok "Created Sonarr Service (Port 8989)"
+systemctl daemon-reload
+systemctl enable --now sonarr &>/dev/null || msg_error "Failed to start Sonarr"
+msg_ok "Sonarr service created and started (Port 8989)"
 
 # ======================
 # Radarr Installation
 # ======================
 msg_info "Installing Radarr"
-fetch_and_deploy_gh_release "Radarr" "Radarr/Radarr" "prebuild" "latest" "/opt/Radarr" "Radarr.master*linux-core-x64.tar.gz"
 mkdir -p /var/lib/radarr/
-chmod 775 /var/lib/radarr/ /opt/Radarr/
-msg_ok "Installed Radarr"
 
-msg_info "Creating Radarr Service"
+cd /tmp
+RADARR_VERSION=$(curl -s https://api.github.com/repos/Radarr/Radarr/releases/latest | grep -oP '"tag_name": "v\K[^"]*')
+curl -fsSL "https://github.com/Radarr/Radarr/releases/download/v${RADARR_VERSION}/Radarr.master.${RADARR_VERSION}.linux-core-x64.tar.gz" -o "Radarr.tar.gz" || msg_error "Failed to download Radarr"
+tar -xzf Radarr.tar.gz -C /opt/
+chmod 775 /var/lib/radarr/ /opt/Radarr/
+rm -rf Radarr.tar.gz
+msg_ok "Radarr installed"
+
+msg_info "Creating Radarr service"
 cat <<EOF >/etc/systemd/system/radarr.service
 [Unit]
 Description=Radarr Daemon
@@ -122,38 +192,47 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable -q --now radarr
-msg_ok "Created Radarr Service (Port 7878)"
+systemctl daemon-reload
+systemctl enable --now radarr &>/dev/null || msg_error "Failed to start Radarr"
+msg_ok "Radarr service created and started (Port 7878)"
 
 # ======================
-# Summary
+# Create media user
 # ======================
-msg_info "Creating shared media user (optional setup)"
-# Create a common media user for better permission management
+msg_info "Creating media user for permission management"
 groupadd -g 1500 media 2>/dev/null || true
 useradd -u 1500 -g media -m -s /bin/bash media 2>/dev/null || true
 msg_ok "Media user created (UID: 1500, GID: 1500)"
 
-motd_ssh
-customize
-cleanup_lxc
+# ======================
+# Final Summary
+# ======================
+IP=$(hostname -I | awk '{print $1}')
 
-# Display summary
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Media Stack Installation Complete!"
+echo "  ✅ Media Stack Installation Complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "  Services installed and running:"
-echo "  • SABnzbd:  http://$(hostname -I | awk '{print $1}'):7777"
-echo "  • Sonarr:   http://$(hostname -I | awk '{print $1}'):8989"
-echo "  • Radarr:   http://$(hostname -I | awk '{print $1}'):7878"
+echo "  • SABnzbd:  http://${IP}:7777"
+echo "  • Sonarr:   http://${IP}:8989"
+echo "  • Radarr:   http://${IP}:7878"
+echo ""
+echo "  Next steps:"
+echo "  1. Configure SABnzbd with your Usenet provider"
+echo "  2. Set download paths in SABnzbd"
+echo "  3. Add SABnzbd as download client in Sonarr/Radarr"
+echo "     (Host: localhost, Port: 7777)"
+echo "  4. Configure your media root folders"
 echo ""
 echo "  Notes:"
 echo "  • All services run as root by default"
 echo "  • A 'media' user (UID: 1500) has been created"
-echo "  • For NFS/CIFS mounts, consider using the media user"
-echo "  • Configure download paths in SABnzbd first"
-echo "  • Point Sonarr/Radarr to SABnzbd as download client"
+echo "  • For NFS/CIFS mounts, use UID/GID: 1500"
+echo ""
+echo "  Check service status:"
+echo "  systemctl status sabnzbd sonarr radarr"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
